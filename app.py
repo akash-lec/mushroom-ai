@@ -1,123 +1,128 @@
-    border: 1px solid var(--border);
-    border-radius: 0;
-    padding: 14px;
-    margin-top: 12px;
-}
-#composer {
-    background: #ffffff;
-    border: 1px solid #cfd5cc;
-    border-radius: 0;
-    padding: 8px 10px;
-    margin-top: 10px;
-    box-shadow: 0 3px 10px rgba(20, 30, 20, 0.05);
-}
-#message_box textarea {
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    font-size: 14px !important;
-    padding: 12px 10px !important;
-    color: var(--text) !important;
-    min-height: 52px !important;
-}
-#message_box textarea:focus { outline: none !important; border: none !important; box-shadow: none !important; }
-#message_box > div { border: none !important; box-shadow: none !important; background: transparent !important; }
-#send_button {
-    background: var(--text) !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 0 !important;
-    min-height: 52px !important;
-    font-weight: 600 !important;
-    padding: 0 22px !important;
-}
-#send_button:hover { background: var(--accent-dark) !important; }
-.footer { text-align: center; margin-top: 14px; color: #8c938b; font-size: 12px; }
+import os
+import json
+import re
+
+import gradio as gr
+from google import genai
+from google.genai import types
+
+MODEL_NAME = "gemini-3.5-flash-lite"
+
+api_key = os.getenv("GEMINI_API_KEY")
+if not api_key:
+    raise ValueError("GEMINI_API_KEY is missing. Add it in Render Environment Variables.")
+
+client = genai.Client(api_key=api_key)
+
+SYSTEM_PROMPT = """
+You are a mushroom expert chatbot.
+
+Your role:
+- Answer questions about mushrooms and fungi.
+- Help with mushroom identification from images.
+- Keep answers short, natural, and factual.
+- Clearly mention uncertainty when identification is not reliable.
+
+Safety:
+- Never claim that a wild mushroom is safe to eat based only on an image.
+- Toxic mushrooms may be discussed factually, including general effects and historical use.
+- Do not give step-by-step preparation, detoxification, or consumption instructions.
+- If a toxic mushroom has historically been consumed after special processing,
+  you may mention that only in general terms without explaining the method.
+- Make clear that misidentification or incorrect handling can be dangerous.
+- Avoid inventing medical, chemical, or species information.
+
+Topic control:
+- Stay focused on mushrooms and fungi.
+- If the user asks about an unrelated topic, politely redirect the conversation back to mushrooms.
 """
 
 
-with gr.Blocks() as demo:
-    with gr.Column(elem_classes="app-shell"):
-        gr.HTML("""
-        <div class="header-card">
-            <div class="app-title">Mushroom.ai</div>
-            <div class="app-subtitle">Multimodal mushroom analysis and conversational guidance</div>
-        </div>
-        """)
+def calibrate_confidence(result):
+    visible_count = len(result.get("visible", []))
+    confidence = result.get("confidence", 0.0)
 
-        with gr.Row(equal_height=True):
-            with gr.Column(scale=1, min_width=280, elem_classes="side-panel"):
-                gr.HTML("""
-                <div class="panel-title">Image</div>
-                <div class="panel-text">Upload a mushroom image for visual analysis.</div>
-                """)
-                image_input = gr.Image(type="pil", label=None, elem_classes="image-box")
-                gr.HTML("""
-                <div class="mini-card">
-                    <div class="panel-title">Usage</div>
-                    <div class="panel-text">
-                        Upload an image by itself for a short summary,
-                        or combine it with a question for a specific answer.
-                    </div>
-                </div>
-                """)
+    if visible_count == 0:
+        confidence = min(confidence, 0.30)
+    elif visible_count == 1:
+        confidence = min(confidence, 0.50)
+    elif visible_count == 2:
+        confidence = min(confidence, 0.70)
 
-            with gr.Column(scale=3, min_width=650, elem_classes="chat-panel"):
-                chatbot = gr.Chatbot(height=560, elem_id="chatbot")
-                with gr.Row(elem_id="composer"):
-                    message_input = gr.Textbox(
-                        placeholder="Ask about this mushroom...",
-                        show_label=False,
-                        lines=1,
-                        max_lines=4,
-                        scale=8,
-                        elem_id="message_box"
-                    )
-                    send_button = gr.Button("Send", scale=1, elem_id="send_button")
+    result["confidence"] = confidence
+    return result
 
-            with gr.Column(scale=1, min_width=260, elem_classes="info-panel"):
-                gr.HTML("""
-                <div class="panel-title">About</div>
-                <div class="panel-text">
-                    Ask about visible features, identification,
-                    confidence, habitat, or mushroom safety.
-                </div>
 
-                <div class="mini-card">
-                    <div class="panel-title">Safety</div>
-                    <div class="panel-text">
-                        Image-based identification can be uncertain.
-                        Do not use this assistant alone to decide whether
-                        a wild mushroom is safe to eat.
-                    </div>
-                </div>
+def analyze_mushroom(image):
+    prompt = """
+Carefully analyze this mushroom image.
 
-                <div class="mini-card">
-                    <div class="panel-title">Model</div>
-                    <div class="panel-text">Gemini 3.5 Flash-Lite</div>
-                </div>
-                """)
+First inspect the visible cap, hymenium, stipe, color,
+surface texture, and other useful visual features.
 
-        gr.HTML('<div class="footer">Developed by Nusrat Khan</div>')
+Then make the most likely identification.
 
-    send_button.click(
-        fn=chat_function,
-        inputs=[message_input, image_input, chatbot],
-        outputs=[chatbot, message_input, image_input]
+Return ONLY valid JSON:
+
+{
+  "common_name": "string",
+  "genus": "string",
+  "confidence": 0.0,
+  "visible": [],
+  "color": "string",
+  "edible": false
+}
+
+Rules:
+- confidence must be between 0 and 1
+- visible may only contain "cap", "hymenium", and "stipe"
+- include only parts clearly visible in the image
+- do not assume hidden features
+- distinguish look-alike mushrooms carefully
+- lower confidence when important features are missing
+- use "Unknown" when the visual evidence is too weak
+- color should describe the main visible color
+- edible must be true or false based on general knowledge of the predicted species
+- never use the edible field as advice that the photographed mushroom is safe to eat
+- return JSON only
+"""
+
+    response = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=[image, prompt],
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0,
+        ),
     )
 
-    message_input.submit(
-        fn=chat_function,
-        inputs=[message_input, image_input, chatbot],
-        outputs=[chatbot, message_input, image_input]
-    )
+    text = response.text.strip()
+    match = re.search(r"\{.*\}", text, re.DOTALL)
 
+    if match:
+        try:
+            result = json.loads(match.group())
+            allowed_parts = {"cap", "hymenium", "stipe"}
+            result["visible"] = [
+                part for part in result.get("visible", []) if part in allowed_parts
+            ]
 
-port = int(os.environ.get("PORT", 10000))
+            if not isinstance(result.get("confidence"), (int, float)):
+                result["confidence"] = 0.0
+            result["confidence"] = max(0.0, min(1.0, result["confidence"]))
 
-demo.queue()
-demo.launch(
-    server_name="0.0.0.0",
-    server_port=port,
-    css=css
-)
+            if not isinstance(result.get("edible"), bool):
+                result["edible"] = False
+
+            result["common_name"] = result.get("common_name", "Unknown")
+            result["genus"] = result.get("genus", "Unknown")
+            result["color"] = result.get("color", "Unknown")
+
+            return calibrate_confidence(result)
+        except json.JSONDecodeError:
+            pass
+
+    return {
+        "common_name": "Unknown",
+        "genus": "Unknown",
+        "confidence": 0.0,
