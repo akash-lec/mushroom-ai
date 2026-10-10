@@ -102,6 +102,7 @@ Rules:
     if match:
         try:
             result = json.loads(match.group())
+
             allowed_parts = {"cap", "hymenium", "stipe"}
             result["visible"] = [
                 part for part in result.get("visible", []) if part in allowed_parts
@@ -109,6 +110,7 @@ Rules:
 
             if not isinstance(result.get("confidence"), (int, float)):
                 result["confidence"] = 0.0
+
             result["confidence"] = max(0.0, min(1.0, result["confidence"]))
 
             if not isinstance(result.get("edible"), bool):
@@ -119,10 +121,8 @@ Rules:
             result["color"] = result.get("color", "Unknown")
 
             return calibrate_confidence(result)
+
         except json.JSONDecodeError:
             pass
 
     return {
-        "common_name": "Unknown",
-        "genus": "Unknown",
-        "confidence": 0.0,
